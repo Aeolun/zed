@@ -5,7 +5,13 @@ use crate::{
 };
 use anyhow::{Context as _, anyhow};
 use block2::RcBlock;
-use core_foundation::{runloop::CFRunLoopRun, string::CFStringRef};
+use core_foundation::{
+    base::{CFIndex, CFRelease, CFTypeRef},
+    runloop::{CFRunLoopActivity, CFRunLoopAddObserver, CFRunLoopGetMain,
+        CFRunLoopObserverContext, CFRunLoopObserverCreate, CFRunLoopObserverRef,
+        CFRunLoopRemoveObserver, CFRunLoopRun, kCFRunLoopAfterWaiting, kCFRunLoopCommonModes},
+    string::CFStringRef,
+};
 use ctor::ctor;
 use dispatch2::DispatchQueue;
 use futures::channel::oneshot;
@@ -164,6 +170,20 @@ unsafe fn build_classes() {
 
 pub struct MacPlatform(Mutex<MacPlatformState>, MainThreadMarker);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MacPlatformMode {
+    Blocking,
+    Embedded(EmbeddedLifecycle),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EmbeddedLifecycle {
+    Ready,
+    Running,
+    Launched,
+    Terminated,
+}
+
 pub(crate) struct MacPlatformState {
     background_executor: BackgroundExecutor,
     foreground_executor: ForegroundExecutor,
@@ -172,6 +192,7 @@ pub(crate) struct MacPlatformState {
     headless: bool,
     activation_policy: ActivationPolicy,
     application_created: bool,
+    mode: MacPlatformMode,
     general_pasteboard: Pasteboard,
     find_pasteboard: Pasteboard,
     reopen: Option<Box<dyn FnMut()>>,
@@ -237,6 +258,7 @@ impl MacPlatform {
             headless,
             activation_policy: ActivationPolicy::Regular,
             application_created: false,
+            mode: MacPlatformMode::Blocking,
             text_system,
             background_executor: BackgroundExecutor::new(dispatcher.clone()),
             foreground_executor: ForegroundExecutor::new(dispatcher),
@@ -264,6 +286,57 @@ impl MacPlatform {
             system_notifications: crate::system_notifications::SystemNotificationState::new(),
         });
         Self(state, marker)
+    }
+
+    /// Creates a platform whose AppKit event loop is driven by a foreign main loop.
+    ///
+    /// Call [`Platform::run`] once to launch GPUI, then call [`Self::pump_events`]
+    /// regularly from the macOS main thread.
+    pub fn new_embedded() -> Self {
+        assert_main_thread("MacPlatform::new_embedded");
+        let platform = Self::new(false);
+        platform.0.lock().mode = MacPlatformMode::Embedded(EmbeddedLifecycle::Ready);
+        platform
+    }
+
+    /// Processes pending AppKit work without waiting for new events.
+    ///
+    /// Returns `false` after the application receives its termination callback.
+    pub fn pump_events(&self) -> bool {
+        assert_main_thread("MacPlatform::pump_events");
+
+        {
+            let mut state = self.0.lock();
+            match &mut state.mode {
+                MacPlatformMode::Blocking => panic!("pump_events requires new_embedded"),
+                MacPlatformMode::Embedded(EmbeddedLifecycle::Ready) => {
+                    panic!("pump_events requires Platform::run first")
+                }
+                MacPlatformMode::Embedded(EmbeddedLifecycle::Running) => {
+                    panic!("pump_events must not run re-entrantly")
+                }
+                MacPlatformMode::Embedded(EmbeddedLifecycle::Launched) => {
+                    state.mode = MacPlatformMode::Embedded(EmbeddedLifecycle::Running);
+                }
+                MacPlatformMode::Embedded(EmbeddedLifecycle::Terminated) => return false,
+            }
+        }
+
+        autoreleasepool(|_| unsafe { run_app_through_wake() });
+
+        self.finish_embedded_run()
+    }
+
+    fn finish_embedded_run(&self) -> bool {
+        let mut state = self.0.lock();
+        match state.mode {
+            MacPlatformMode::Embedded(EmbeddedLifecycle::Running) => {
+                state.mode = MacPlatformMode::Embedded(EmbeddedLifecycle::Launched);
+                true
+            }
+            MacPlatformMode::Embedded(EmbeddedLifecycle::Terminated) => false,
+            _ => unreachable!("embedded event loop returned from an invalid state"),
+        }
     }
 
     unsafe fn create_menu_bar(
@@ -501,6 +574,78 @@ impl MacPlatform {
     }
 }
 
+fn assert_main_thread(operation: &str) {
+    assert!(MainThreadMarker::new().is_some(), "{operation} must run on the macOS main thread");
+}
+
+unsafe fn run_app_through_wake() {
+    // GPUI frame ticks use a main-queue source, which only runs after the run loop wakes.
+    // Pre-posting an event makes that wake non-blocking; stopping before it starves frames.
+    extern "C" fn observe_run_loop(_: CFRunLoopObserverRef, _: CFRunLoopActivity, _: *mut c_void) {
+        unsafe { stop_app_immediately() };
+    }
+
+    unsafe {
+        let run_loop = CFRunLoopGetMain();
+        let mut context = CFRunLoopObserverContext {
+            version: 0,
+            info: ptr::null_mut(),
+            retain: None,
+            release: None,
+            copyDescription: None,
+        };
+        let observer = CFRunLoopObserverCreate(
+            ptr::null(),
+            kCFRunLoopAfterWaiting,
+            0,
+            CFIndex::MIN,
+            observe_run_loop,
+            &mut context,
+        );
+        assert!(!observer.is_null(), "failed to create AppKit pump observer");
+        CFRunLoopAddObserver(run_loop, observer, kCFRunLoopCommonModes);
+
+        post_wake_event();
+        let app: *mut AnyObject = msg_send![APP_CLASS, sharedApplication];
+        let _: () = msg_send![app, run];
+
+        CFRunLoopRemoveObserver(run_loop, observer, kCFRunLoopCommonModes);
+        CFRelease(observer as CFTypeRef);
+    }
+}
+
+unsafe fn post_wake_event() {
+    unsafe {
+        let app: *mut AnyObject = msg_send![APP_CLASS, sharedApplication];
+        let event: *mut AnyObject = msg_send![class!(NSEvent),
+            otherEventWithType: 15usize,
+            location: objc2_foundation::NSPoint::new(0.0, 0.0),
+            modifierFlags: NSEventModifierFlags::empty(),
+            timestamp: 0.0f64,
+            windowNumber: 0isize,
+            context: ptr::null_mut::<AnyObject>(),
+            subtype: 0i16,
+            data1: 0isize,
+            data2: 0isize
+        ];
+        if event.is_null() {
+            log::error!("failed to create AppKit wake event");
+        } else {
+            let _: () = msg_send![app, postEvent: event, atStart: true];
+        }
+    }
+}
+
+unsafe fn stop_app_immediately() {
+    unsafe {
+        let app: *mut AnyObject = msg_send![APP_CLASS, sharedApplication];
+        let _: () = msg_send![app, stop: ptr::null_mut::<AnyObject>()];
+
+        // NSApplication only observes stop after receiving another event.
+        post_wake_event();
+    }
+}
+
 impl Platform for MacPlatform {
     fn platform_info(&self) -> gpui::PlatformInfo {
         gpui::PlatformInfo {
@@ -523,6 +668,15 @@ impl Platform for MacPlatform {
 
     fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
         let mut state = self.0.lock();
+        let embedded = match state.mode {
+            MacPlatformMode::Blocking => false,
+            MacPlatformMode::Embedded(EmbeddedLifecycle::Ready) => {
+                assert_main_thread("embedded MacPlatform::run");
+                state.mode = MacPlatformMode::Embedded(EmbeddedLifecycle::Running);
+                true
+            }
+            MacPlatformMode::Embedded(_) => panic!("embedded MacPlatform can only run once"),
+        };
         if state.headless {
             drop(state);
             on_finish_launching();
@@ -561,15 +715,19 @@ impl Platform for MacPlatform {
                 let _: () = msg_send![app, run];
             });
 
-            mac_platform_ivar(&*app)
-                .load_ptr::<*mut c_void>(&*app)
-                .write(ptr::null_mut());
-            let app_delegate: *mut AnyObject = msg_send![app, delegate];
-            mac_platform_ivar(&*app_delegate)
-                .load_ptr::<*mut c_void>(&*app_delegate)
-                .write(ptr::null_mut());
+            if embedded {
+                self.finish_embedded_run();
+            } else {
+                mac_platform_ivar(&*app)
+                    .load_ptr::<*mut c_void>(&*app)
+                    .write(ptr::null_mut());
+                let app_delegate: *mut AnyObject = msg_send![app, delegate];
+                mac_platform_ivar(&*app_delegate)
+                    .load_ptr::<*mut c_void>(&*app_delegate)
+                    .write(ptr::null_mut());
+                self.0.lock().application_created = false;
+            }
         }
-        self.0.lock().application_created = false;
     }
 
     fn quit(&self) {
@@ -1321,7 +1479,7 @@ extern "C-unwind" fn did_finish_launching(this: &AnyObject, _: Sel, _: *mut AnyO
         ];
 
         let platform = get_mac_platform(this);
-        let callback = {
+        let (callback, embedded) = {
             let mut state = platform.0.lock();
             if (state.on_system_sleep.is_some() || state.on_system_wake.is_some())
                 && !state.system_power_observers_registered
@@ -1329,10 +1487,16 @@ extern "C-unwind" fn did_finish_launching(this: &AnyObject, _: Sel, _: *mut AnyO
                 register_system_power_observers(this);
                 state.system_power_observers_registered = true;
             }
-            state.finish_launching.take()
+            (
+                state.finish_launching.take(),
+                matches!(state.mode, MacPlatformMode::Embedded(_)),
+            )
         };
         if let Some(callback) = callback {
             callback();
+        }
+        if embedded {
+            stop_app_immediately();
         }
     }
 }
@@ -1380,6 +1544,9 @@ extern "C-unwind" fn should_handle_reopen(
 extern "C-unwind" fn will_terminate(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     let platform = unsafe { get_mac_platform(this) };
     let mut lock = platform.0.lock();
+    if matches!(lock.mode, MacPlatformMode::Embedded(_)) {
+        lock.mode = MacPlatformMode::Embedded(EmbeddedLifecycle::Terminated);
+    }
     if let Some(mut callback) = lock.quit.take() {
         drop(lock);
         callback();
