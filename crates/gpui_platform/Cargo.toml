@@ -43,7 +43,6 @@ harness = false
 required-features = ["bench-support"]
 
 [dependencies]
-anyhow.workspace = true
 gpui.workspace = true
 
 [dev-dependencies]
