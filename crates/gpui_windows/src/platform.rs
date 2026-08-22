@@ -57,6 +57,7 @@ pub struct WindowsPlatform {
     initial_windowing: RefCell<Option<WindowingRequest>>,
     /// Set to stop the current `VSyncProvider` thread, which runs while windowed.
     vsync_stop: RefCell<Option<Arc<AtomicBool>>>,
+    mode: Cell<WindowsPlatformMode>,
     // The below members will never change throughout the entire lifecycle of the app.
     /// Created with `headless()`: never windowed, and without a real text system.
     headless: bool,
@@ -75,6 +76,46 @@ pub struct WindowsPlatform {
     has_package_identity: bool,
     app_identity: RefCell<Option<(String, String)>>,
     system_notifications: RefCell<SystemNotificationState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowsPlatformMode {
+    Blocking,
+    Embedded(EmbeddedLifecycle),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EmbeddedLifecycle {
+    Ready,
+    Running,
+    Launched,
+    Terminated,
+}
+
+impl EmbeddedLifecycle {
+    fn begin_run(self) -> Self {
+        match self {
+            Self::Ready => Self::Running,
+            _ => panic!("embedded WindowsPlatform can only run once"),
+        }
+    }
+
+    fn begin_pump(self) -> Option<Self> {
+        match self {
+            Self::Ready => panic!("pump_events requires Platform::run first"),
+            Self::Running => panic!("pump_events must not run re-entrantly"),
+            Self::Launched => Some(Self::Running),
+            Self::Terminated => None,
+        }
+    }
+
+    fn finish(self) -> (Self, bool) {
+        match self {
+            Self::Running => (Self::Launched, true),
+            Self::Terminated => (Self::Terminated, false),
+            _ => unreachable!("embedded event loop returned from an invalid state"),
+        }
+    }
 }
 
 struct WindowsPlatformInner {
@@ -271,6 +312,7 @@ impl WindowsPlatform {
             raw_window_handles,
             initial_windowing: RefCell::new(None),
             vsync_stop: RefCell::new(None),
+            mode: Cell::new(WindowsPlatformMode::Blocking),
             headless,
             icon,
             background_executor,
@@ -285,6 +327,69 @@ impl WindowsPlatform {
             app_identity: RefCell::new(None),
             system_notifications: RefCell::new(SystemNotificationState::new()),
         })
+    }
+
+    /// Creates a platform whose Win32 message loop is driven by a foreign UI loop.
+    pub fn new_embedded() -> Result<Self> {
+        let platform = Self::new(false)?;
+        platform.assert_main_thread("WindowsPlatform::new_embedded");
+        platform
+            .mode
+            .set(WindowsPlatformMode::Embedded(EmbeddedLifecycle::Ready));
+        Ok(platform)
+    }
+
+    /// Drains pending Win32 messages without waiting for new work.
+    ///
+    /// Returns `false` after receiving `WM_QUIT`.
+    pub fn pump_events(&self) -> bool {
+        self.assert_main_thread("WindowsPlatform::pump_events");
+
+        let lifecycle = match self.mode.get() {
+            WindowsPlatformMode::Blocking => panic!("pump_events requires new_embedded"),
+            WindowsPlatformMode::Embedded(lifecycle) => lifecycle,
+        };
+        let Some(lifecycle) = lifecycle.begin_pump() else {
+            return false;
+        };
+        self.mode.set(WindowsPlatformMode::Embedded(lifecycle));
+
+        let mut msg = MSG::default();
+        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() } {
+            if msg.message == WM_QUIT {
+                self.mode
+                    .set(WindowsPlatformMode::Embedded(EmbeddedLifecycle::Terminated));
+                self.invoke_quit_callback();
+                return false;
+            }
+            if !self.inner.translate_accelerator(&msg) {
+                _ = unsafe { TranslateMessage(&msg) };
+                unsafe { DispatchMessageW(&msg) };
+            }
+        }
+
+        self.finish_embedded_run()
+    }
+
+    fn assert_main_thread(&self, operation: &str) {
+        assert!(
+            self.inner.dispatcher.is_main_thread(),
+            "{operation} must run on the thread that created WindowsPlatform"
+        );
+    }
+
+    fn finish_embedded_run(&self) -> bool {
+        let WindowsPlatformMode::Embedded(lifecycle) = self.mode.get() else {
+            unreachable!("only embedded platforms finish an embedded event loop")
+        };
+        let (lifecycle, active) = lifecycle.finish();
+        self.mode.set(WindowsPlatformMode::Embedded(lifecycle));
+        active
+    }
+
+    fn invoke_quit_callback(&self) {
+        self.inner
+            .with_callback(|callbacks| &callbacks.quit, |callback| callback());
     }
 
     pub(crate) fn window_from_hwnd(&self, hwnd: HWND) -> Option<Rc<WindowsWindowInner>> {
@@ -582,10 +687,25 @@ impl Platform for WindowsPlatform {
     }
 
     fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>) {
+        let embedded = match self.mode.get() {
+            WindowsPlatformMode::Blocking => false,
+            WindowsPlatformMode::Embedded(lifecycle) => {
+                self.assert_main_thread("embedded WindowsPlatform::run");
+                self.mode
+                    .set(WindowsPlatformMode::Embedded(lifecycle.begin_run()));
+                true
+            }
+        };
+
         if !self.headless {
             self.connect_initially();
         }
         on_finish_launching();
+
+        if embedded {
+            self.finish_embedded_run();
+            return;
+        }
 
         let mut msg = MSG::default();
         unsafe {
@@ -1299,10 +1419,16 @@ impl WindowsPlatformInner {
                     // then quit out of foreground work to allow us to process other gpui events first before returning back to foreground task work
                     // if we don't we might not for example process window quit events
                     let mut msg = MSG::default();
-                    let process_message = |msg: &_| {
-                        if !self.translate_accelerator(msg) {
-                            _ = unsafe { TranslateMessage(msg) };
-                            unsafe { DispatchMessageW(msg) };
+                    let process_message = |msg: &MSG| {
+                        if msg.message == WM_QUIT {
+                            unsafe { PostQuitMessage(msg.wParam.0 as i32) };
+                            false
+                        } else {
+                            if !self.translate_accelerator(msg) {
+                                _ = unsafe { TranslateMessage(msg) };
+                                unsafe { DispatchMessageW(msg) };
+                            }
+                            true
                         }
                     };
                     let peek_msg = |msg: &mut _, msg_kind| unsafe {
@@ -1310,11 +1436,13 @@ impl WindowsPlatformInner {
                     };
                     // We need to process a paint message here as otherwise we will re-enter `run_foreground_task` before painting if we have work remaining.
                     // The reason for this is that windows prefers custom application message processing over system messages.
-                    if peek_msg(&mut msg, PM_QS_PAINT) {
-                        process_message(&msg);
+                    if peek_msg(&mut msg, PM_QS_PAINT) && !process_message(&msg) {
+                        break 'tasks;
                     }
                     while peek_msg(&mut msg, PM_QS_INPUT) {
-                        process_message(&msg);
+                        if !process_message(&msg) {
+                            break 'tasks;
+                        }
                     }
                     // Allow the main loop to process other gpui events before going back into `run_foreground_task`
                     unsafe {
@@ -1403,6 +1531,16 @@ impl WindowsPlatformInner {
         }
 
         Some(0)
+    }
+}
+
+impl EmbeddedPlatform for WindowsPlatform {
+    fn into_platform(self: Rc<Self>) -> Rc<dyn Platform> {
+        self
+    }
+
+    fn pump_events(&self) -> bool {
+        WindowsPlatform::pump_events(self)
     }
 }
 
@@ -1936,6 +2074,23 @@ mod tests {
         unsafe { CredFree(credentials as *const _ as _) };
         unsafe { CredDeleteW(target_name, CRED_TYPE_GENERIC, None) }.unwrap();
         result.unwrap()
+    }
+    use super::{EmbeddedLifecycle, encode_restart_arguments};
+
+    #[test]
+    fn test_embedded_lifecycle() {
+        let running = EmbeddedLifecycle::Ready.begin_run();
+        assert_eq!(running, EmbeddedLifecycle::Running);
+
+        let (launched, active) = running.finish();
+        assert_eq!(launched, EmbeddedLifecycle::Launched);
+        assert!(active);
+        assert_eq!(launched.begin_pump(), Some(EmbeddedLifecycle::Running));
+        assert_eq!(EmbeddedLifecycle::Terminated.begin_pump(), None);
+        assert_eq!(
+            EmbeddedLifecycle::Terminated.finish(),
+            (EmbeddedLifecycle::Terminated, false)
+        );
     }
 
     #[test]

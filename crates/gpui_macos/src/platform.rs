@@ -16,7 +16,7 @@ use ctor::ctor;
 use dispatch2::DispatchQueue;
 use futures::channel::oneshot;
 use gpui::{
-    Action, ActivationPolicy, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem,
+    EmbeddedPlatform, Action, ActivationPolicy, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem,
     CursorStyle, ForegroundExecutor, GraphicalEnvironment, KeyContext, Keymap, Menu, MenuItem,
     OsMenu, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout,
     PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Result, SystemMenuType, Task,
@@ -1438,6 +1438,16 @@ impl Platform for MacPlatform {
         let url = url.to_string();
         self.background_executor()
             .spawn(async move { Ok(keychain::delete_credentials(&url)?) })
+    }
+}
+
+impl EmbeddedPlatform for MacPlatform {
+    fn into_platform(self: Rc<Self>) -> Rc<dyn Platform> {
+        self
+    }
+
+    fn pump_events(&self) -> bool {
+        MacPlatform::pump_events(self)
     }
 }
 
