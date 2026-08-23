@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     rc::{Rc, Weak},
     str::FromStr,
-    sync::{Arc, Once, atomic::AtomicBool},
+    sync::{Arc, Once, OnceLock, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -788,7 +788,7 @@ impl PlatformWindow for WindowsWindow {
                     config.pfCallback = Some(crate::dialog::task_dialog_callback);
                     config.lpCallbackData = button_id_map.contains(&IDCANCEL.0) as isize;
                     let mut res = std::mem::zeroed();
-                    TaskDialogIndirect(&config, Some(&mut res), None, None)
+                    task_dialog_indirect(&config, &mut res)
                         .context("unable to create task dialog")?;
                     Ok(button_id_map.iter().position(|&button_id| button_id == res))
                 }
@@ -1623,6 +1623,36 @@ fn dwm_set_window_composition_attribute(hwnd: HWND, backdrop_type: u32) {
             return;
         }
     }
+}
+
+// comctl32 v6 only. A static import breaks LoadLibrary inside node/bun.
+fn task_dialog_indirect(config: *const TASKDIALOGCONFIG, button: &mut i32) -> anyhow::Result<()> {
+    type TaskDialogIndirectFn = unsafe extern "system" fn(
+        *const TASKDIALOGCONFIG,
+        *mut i32,
+        *mut i32,
+        *mut BOOL,
+    ) -> HRESULT;
+
+    static FUNC: OnceLock<Option<TaskDialogIndirectFn>> = OnceLock::new();
+    let func = FUNC
+        .get_or_init(|| {
+            let module_name = PCSTR::from_raw(c"comctl32.dll".as_ptr() as *const u8);
+            // Keep the refcount. Do not use GetModuleHandle; that handle can vanish.
+            let module = unsafe { LoadLibraryA(module_name) }.ok()?;
+            let proc_name = PCSTR::from_raw(c"TaskDialogIndirect".as_ptr() as *const u8);
+            let proc = unsafe { GetProcAddress(module, proc_name) }?;
+            Some(unsafe { std::mem::transmute(proc) })
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "TaskDialogIndirect is unavailable (comctl32 v6 is not active in this process)"
+            )
+        })?;
+
+    unsafe { func(config, button, std::ptr::null_mut(), std::ptr::null_mut()) }
+        .ok()
+        .context("unable to create task dialog")
 }
 
 fn set_window_composition_attribute(hwnd: HWND, color: Option<Color>, state: u32) {
