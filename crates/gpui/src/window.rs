@@ -10,7 +10,7 @@ use crate::{
     Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
-    Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
+    Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, KeyListener,
     Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
     MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
     PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
@@ -1048,6 +1048,7 @@ pub(crate) struct Frame {
     pub(crate) element_states: FxHashMap<(GlobalElementId, TypeId), ElementStateBox>,
     accessed_element_states: Vec<(GlobalElementId, TypeId)>,
     pub(crate) mouse_listeners: Vec<Option<AnyMouseListener>>,
+    root_key_listeners: Vec<Option<KeyListener>>,
     pub(crate) dispatch_tree: DispatchTree,
     pub(crate) scene: Scene,
     pub(crate) hitboxes: Vec<Hitbox>,
@@ -1083,6 +1084,7 @@ pub(crate) struct PaintIndex {
     #[cfg(any(test, feature = "test-support"))]
     debug_bounds_index: usize,
     mouse_listeners_index: usize,
+    root_key_listeners_index: usize,
     input_handlers_index: usize,
     cursor_styles_index: usize,
     accessed_element_states_index: usize,
@@ -1104,6 +1106,7 @@ impl Frame {
             element_states: FxHashMap::default(),
             accessed_element_states: Vec::new(),
             mouse_listeners: Vec::new(),
+            root_key_listeners: Vec::new(),
             dispatch_tree,
             scene: Scene::default(),
             hitboxes: Vec::new(),
@@ -1131,6 +1134,7 @@ impl Frame {
         self.element_states.clear();
         self.accessed_element_states.clear();
         self.mouse_listeners.clear();
+        self.root_key_listeners.clear();
         self.dispatch_tree.clear();
         self.scene.clear();
         self.input_handlers.clear();
@@ -4074,6 +4078,7 @@ impl Window {
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds_index: self.next_frame.debug_bounds_records.len(),
             mouse_listeners_index: self.next_frame.mouse_listeners.len(),
+            root_key_listeners_index: self.next_frame.root_key_listeners.len(),
             input_handlers_index: self.next_frame.input_handlers.len(),
             cursor_styles_index: self.next_frame.cursor_styles.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
@@ -4106,6 +4111,12 @@ impl Window {
         self.next_frame.mouse_listeners.extend(
             self.rendered_frame.mouse_listeners
                 [range.start.mouse_listeners_index..range.end.mouse_listeners_index]
+                .iter_mut()
+                .map(|listener| listener.take()),
+        );
+        self.next_frame.root_key_listeners.extend(
+            self.rendered_frame.root_key_listeners
+                [range.start.root_key_listeners_index..range.end.root_key_listeners_index]
                 .iter_mut()
                 .map(|listener| listener.take()),
         );
@@ -5515,22 +5526,24 @@ impl Window {
 
     /// Register a key event listener on the dispatch root for the next frame.
     /// Unlike [`Window::on_key_event`], this listener receives events regardless
-    /// of which element has focus.
+    /// of which element has focus. Key bindings and actions run first and can
+    /// consume the event. Otherwise, the listener participates in normal capture
+    /// and bubble propagation for this window.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
-    pub fn on_global_key_event<Event: KeyEvent>(
+    pub fn on_root_key_event<Event: KeyEvent>(
         &mut self,
         listener: impl Fn(&Event, DispatchPhase, &mut Window, &mut App) + 'static,
     ) {
         self.invalidator.debug_assert_paint();
 
-        self.next_frame.dispatch_tree.on_global_key_event(Rc::new(
+        self.next_frame.root_key_listeners.push(Some(Rc::new(
             move |event: &dyn Any, phase, window: &mut Window, cx: &mut App| {
                 if let Some(event) = event.downcast_ref::<Event>() {
                     listener(event, phase, window, cx)
                 }
             },
-        ));
+        )));
     }
 
     /// Register a modifiers changed event listener on the window for the next frame.
@@ -6333,7 +6346,21 @@ impl Window {
         dispatch_path: &SmallVec<[DispatchNodeId; 32]>,
         cx: &mut App,
     ) {
+        let root_key_listeners = self
+            .rendered_frame
+            .root_key_listeners
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+
         // Capture phase
+        for listener in &root_key_listeners {
+            listener(event, DispatchPhase::Capture, self, cx);
+            if !cx.propagate_event {
+                return;
+            }
+        }
         for node_id in dispatch_path {
             let node = self.rendered_frame.dispatch_tree.node(*node_id);
 
@@ -6354,6 +6381,12 @@ impl Window {
                 if !cx.propagate_event {
                     return;
                 }
+            }
+        }
+        for listener in &root_key_listeners {
+            listener(event, DispatchPhase::Bubble, self, cx);
+            if !cx.propagate_event {
+                return;
             }
         }
     }
