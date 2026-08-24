@@ -97,6 +97,8 @@ impl ImeMirror {
             .map_err(|e| anyhow::anyhow!("Failed to create textarea element: {e:?}"))?
             .dyn_into()
             .map_err(|e| anyhow::anyhow!("Created element is not a textarea: {e:?}"))?;
+        element.set_attribute("data-gpui-input", "")
+            .map_err(|error| anyhow::anyhow!("Failed to identify input element: {error:?}"))?;
         let style = element.style();
         style.set_property("position", "fixed").ok();
         style.set_property("top", "0").ok();
