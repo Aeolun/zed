@@ -97,15 +97,43 @@ impl ImeMirror {
             .map_err(|e| anyhow::anyhow!("Failed to create textarea element: {e:?}"))?
             .dyn_into()
             .map_err(|e| anyhow::anyhow!("Created element is not a textarea: {e:?}"))?;
-        element.set_attribute("data-gpui-input", "")
-            .map_err(|error| anyhow::anyhow!("Failed to identify input element: {error:?}"))?;
-        let style = element.style();
-        style.set_property("position", "fixed").ok();
-        style.set_property("top", "0").ok();
-        style.set_property("left", "0").ok();
-        style.set_property("width", "1px").ok();
-        style.set_property("height", "1px").ok();
-        style.set_property("opacity", "0").ok();
+        // IME needs a focused DOM input. Host `input` CSS must not unhide it.
+        for (name, value) in [
+            ("data-gpui-input", ""),
+            ("autocomplete", "off"),
+            ("autocorrect", "off"),
+            ("autocapitalize", "none"),
+            ("spellcheck", "false"),
+        ] {
+            element.set_attribute(name, value).map_err(|error| {
+                anyhow::anyhow!("Failed to configure the input element ({name}): {error:?}")
+            })?;
+        }
+        let input_style = element.style();
+        for (property, value) in [
+            ("position", "fixed"),
+            ("top", "0"),
+            ("left", "0"),
+            ("width", "1px"),
+            ("height", "1px"),
+            ("margin", "0"),
+            ("padding", "0"),
+            ("border", "0"),
+            ("outline", "none"),
+            ("opacity", "0"),
+            ("overflow", "hidden"),
+            ("background", "transparent"),
+            ("caret-color", "transparent"),
+            ("color", "transparent"),
+            ("pointer-events", "none"),
+            ("clip-path", "inset(50%)"),
+        ] {
+            input_style
+                .set_property_with_priority(property, value, "important")
+                .map_err(|error| {
+                    anyhow::anyhow!("Failed to hide the input element ({property}): {error:?}")
+                })?;
+        }
         // Android Chrome zooms the visual viewport onto a focused text input
         // whose font is smaller than 16px; with page zoom disabled the user
         // can never zoom back out, so keep the hidden IME input at 16px.
