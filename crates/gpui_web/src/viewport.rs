@@ -87,7 +87,14 @@ impl WebViewport {
         };
         let insets = WindowInsets {
             safe_area,
-            ..WindowInsets::default()
+            ime: Edges {
+                bottom: px(window.visual_viewport().map_or(0.0, |viewport| {
+                    let scale = viewport.scale();
+                    let height = viewport.height() * if scale > 0.0 { scale } else { 1.0 };
+                    (layout_height - height).max(0.0) as f32
+                })),
+                ..Edges::default()
+            },
         };
         let changed = self.visible_bounds != visible_bounds || self.insets != insets;
         self.visible_bounds = visible_bounds;
