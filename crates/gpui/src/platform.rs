@@ -16,7 +16,10 @@ mod threaded_dispatcher;
 #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
 mod test;
 
-#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+#[cfg(all(
+    any(target_os = "macos", target_os = "windows"),
+    any(test, feature = "test-support")
+))]
 mod visual_test;
 
 #[cfg(all(
@@ -180,7 +183,10 @@ pub use test::{TestDispatcher, TestScreenCaptureSource, TestScreenCaptureStream}
 #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
 pub use threaded_dispatcher::ThreadedDispatcher;
 
-#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
+#[cfg(all(
+    any(target_os = "macos", target_os = "windows"),
+    any(test, feature = "test-support")
+))]
 pub use visual_test::VisualTestPlatform;
 
 /// Keeps an operating system activity, such as an idle sleep inhibitor, alive until dropped.
