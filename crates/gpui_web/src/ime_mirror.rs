@@ -97,19 +97,14 @@ impl ImeMirror {
             .map_err(|e| anyhow::anyhow!("Failed to create textarea element: {e:?}"))?
             .dyn_into()
             .map_err(|e| anyhow::anyhow!("Created element is not a textarea: {e:?}"))?;
-        // IME needs a focused DOM input. Host `input` CSS must not unhide it.
-        for (name, value) in [
-            ("data-gpui-input", ""),
-            ("autocomplete", "off"),
-            ("autocorrect", "off"),
-            ("autocapitalize", "none"),
-            ("spellcheck", "false"),
-        ] {
-            element.set_attribute(name, value).map_err(|error| {
-                anyhow::anyhow!("Failed to configure the input element ({name}): {error:?}")
-            })?;
-        }
-        let input_style = element.style();
+        // Host `input`/`textarea` CSS must not unhide this. iOS also pops
+        // the software keyboard for a focused 1px field unless it starts
+        // read-only; `sync_virtual_keyboard` clears that when a GPUI text
+        // field actually takes focus.
+        element
+            .set_attribute("data-gpui-input", "")
+            .map_err(|e| anyhow::anyhow!("Failed to mark the IME element: {e:?}"))?;
+        let style = element.style();
         for (property, value) in [
             ("position", "fixed"),
             ("top", "0"),
@@ -127,17 +122,20 @@ impl ImeMirror {
             ("color", "transparent"),
             ("pointer-events", "none"),
             ("clip-path", "inset(50%)"),
+            // Android Chrome zooms onto a focused field smaller than 16px.
+            ("font-size", "16px"),
         ] {
-            input_style
+            style
                 .set_property_with_priority(property, value, "important")
-                .map_err(|error| {
-                    anyhow::anyhow!("Failed to hide the input element ({property}): {error:?}")
-                })?;
+                .map_err(|e| anyhow::anyhow!("Failed to hide the IME element ({property}): {e:?}"))?;
         }
-        // Android Chrome zooms the visual viewport onto a focused text input
-        // whose font is smaller than 16px; with page zoom disabled the user
-        // can never zoom back out, so keep the hidden IME input at 16px.
-        style.set_property("font-size", "16px").ok();
+        // The element is an IME conduit, not a form field: browser-side text
+        // assistance would mutate it behind the app's back.
+        element.set_spellcheck(false);
+        element.set_attribute("autocomplete", "off").ok();
+        element.set_attribute("autocapitalize", "off").ok();
+        element.set_attribute("autocorrect", "off").ok();
+        element.set_read_only(true);
         body.append_child(&element)
             .map_err(|e| anyhow::anyhow!("Failed to append input to body: {e:?}"))?;
         Self::focus_element(&element);
