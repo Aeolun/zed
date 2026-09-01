@@ -6,10 +6,7 @@ use crate::{
 use anyhow::{Context as _, anyhow};
 use block2::RcBlock;
 use core_foundation::{
-    base::{CFIndex, CFRelease, CFTypeRef},
-    runloop::{CFRunLoopActivity, CFRunLoopAddObserver, CFRunLoopGetMain,
-        CFRunLoopObserverContext, CFRunLoopObserverCreate, CFRunLoopObserverRef,
-        CFRunLoopRemoveObserver, CFRunLoopRun, kCFRunLoopAfterWaiting, kCFRunLoopCommonModes},
+    runloop::{CFRunLoopRun, CFRunLoopRunInMode, kCFRunLoopDefaultMode},
     string::CFStringRef,
 };
 use ctor::ctor;
@@ -322,7 +319,7 @@ impl MacPlatform {
             }
         }
 
-        autoreleasepool(|_| unsafe { run_app_through_wake() });
+        autoreleasepool(|_| unsafe { pump_app_nonblocking() });
 
         self.finish_embedded_run()
     }
@@ -616,39 +613,28 @@ fn assert_main_thread(operation: &str) {
     assert!(MainThreadMarker::new().is_some(), "{operation} must run on the macOS main thread");
 }
 
-unsafe fn run_app_through_wake() {
-    // GPUI frame ticks use a main-queue source, which only runs after the run loop wakes.
-    // Pre-posting an event makes that wake non-blocking; stopping before it starves frames.
-    extern "C" fn observe_run_loop(_: CFRunLoopObserverRef, _: CFRunLoopActivity, _: *mut c_void) {
-        unsafe { stop_app_immediately() };
-    }
-
+unsafe fn pump_app_nonblocking() {
     unsafe {
-        let run_loop = CFRunLoopGetMain();
-        let mut context = CFRunLoopObserverContext {
-            version: 0,
-            info: ptr::null_mut(),
-            retain: None,
-            release: None,
-            copyDescription: None,
-        };
-        let observer = CFRunLoopObserverCreate(
-            ptr::null(),
-            kCFRunLoopAfterWaiting,
-            0,
-            CFIndex::MIN,
-            observe_run_loop,
-            &mut context,
-        );
-        assert!(!observer.is_null(), "failed to create AppKit pump observer");
-        CFRunLoopAddObserver(run_loop, observer, kCFRunLoopCommonModes);
-
-        post_wake_event();
+        // NSApplication::run sleeps until the next display-link wake, which
+        // blocks embedded hosts. Drain only work that is ready now.
         let app: *mut AnyObject = msg_send![APP_CLASS, sharedApplication];
-        let _: () = msg_send![app, run];
+        let distant_past: *mut AnyObject = msg_send![class!(NSDate), distantPast];
+        let mode = kCFRunLoopDefaultMode as *mut AnyObject;
 
-        CFRunLoopRemoveObserver(run_loop, observer, kCFRunLoopCommonModes);
-        CFRelease(observer as CFTypeRef);
+        for _ in 0..256 {
+            let event: *mut AnyObject = msg_send![app,
+                nextEventMatchingMask: usize::MAX
+                untilDate: distant_past
+                inMode: mode
+                dequeue: true
+            ];
+            if event.is_null() {
+                break;
+            }
+            let _: () = msg_send![app, sendEvent: event];
+        }
+        let _: () = msg_send![app, updateWindows];
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, 1);
     }
 }
 
