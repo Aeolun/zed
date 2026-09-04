@@ -103,6 +103,7 @@ const NSTrackingInVisibleRect: NSUInteger = 0x200;
 const NSWindowAnimationBehaviorUtilityWindow: NSInteger = 4;
 #[allow(non_upper_case_globals)]
 const NSViewLayerContentsRedrawDuringViewResize: NSInteger = 2;
+const NS_TITLEBAR_SEPARATOR_STYLE_LINE: NSInteger = 2;
 // https://developer.apple.com/documentation/appkit/nsdragoperation
 type NSDragOperation = NSUInteger;
 #[allow(non_upper_case_globals)]
@@ -1082,6 +1083,21 @@ impl MacWindow {
                 .and_then(|t| t.title.as_ref().map(AsRef::as_ref))
             {
                 window.set_title(title);
+            }
+
+            // AppKit's automatic separator can alternate between a line and no separator
+            // when a CAMetalLayer redraws, producing a one-pixel titlebar flicker. A native,
+            // opaque titlebar always has a separator, so make that choice explicit. Custom
+            // transparent titlebars retain AppKit's automatic behavior.
+            if titlebar
+                .as_ref()
+                .is_some_and(|titlebar| !titlebar.appears_transparent)
+                && is_macos_version_at_least(NSOperatingSystemVersion::new(11, 0, 0))
+            {
+                let _: () = msg_send![
+                    native_window,
+                    setTitlebarSeparatorStyle: NS_TITLEBAR_SEPARATOR_STYLE_LINE
+                ];
             }
 
             native_window.setMovable_(is_movable as BOOL);
