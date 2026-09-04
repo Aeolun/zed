@@ -90,6 +90,7 @@ const NSNormalWindowLevel: NSInteger = 0;
 const NSFloatingWindowLevel: NSInteger = 3;
 #[allow(non_upper_case_globals)]
 const NSPopUpWindowLevel: NSInteger = 101;
+const NS_TITLEBAR_SEPARATOR_STYLE_LINE: NSInteger = 2;
 #[derive(PartialEq)]
 pub enum UserTabbingPreference {
     Never,
@@ -1143,6 +1144,21 @@ impl MacWindow {
                 .and_then(|t| t.title.as_ref().map(AsRef::as_ref))
             {
                 window.set_title(title);
+            }
+
+            // AppKit's automatic separator can alternate between a line and no separator
+            // when a CAMetalLayer redraws, producing a one-pixel titlebar flicker. A native,
+            // opaque titlebar always has a separator, so make that choice explicit. Custom
+            // transparent titlebars retain AppKit's automatic behavior.
+            if titlebar
+                .as_ref()
+                .is_some_and(|titlebar| !titlebar.appears_transparent)
+                && is_macos_version_at_least(NSOperatingSystemVersion::new(11, 0, 0))
+            {
+                let _: () = msg_send![
+                    native_window,
+                    setTitlebarSeparatorStyle: NS_TITLEBAR_SEPARATOR_STYLE_LINE
+                ];
             }
 
             let _: () = msg_send![native_window, setMovable: is_movable.to_objc()];
