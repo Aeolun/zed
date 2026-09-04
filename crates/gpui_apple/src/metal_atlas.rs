@@ -9,7 +9,7 @@ use metal::Device;
 use parking_lot::Mutex;
 use std::borrow::Cow;
 
-pub struct MetalAtlas(Mutex<AtlasState<MetalAtlasTextures>>);
+pub struct MetalAtlas(Mutex<AtlasState<MetalAtlasTextures>>, Mutex<Option<AssertSend<metal::CommandBuffer>>>);
 
 impl MetalAtlas {
     pub(crate) fn new(device: Device, supports_shared_storage: bool) -> Self {
@@ -18,7 +18,17 @@ impl MetalAtlas {
             supports_shared_storage,
             monochrome_textures: Default::default(),
             polychrome_textures: Default::default(),
-        })))
+        })), Mutex::new(None))
+    }
+
+    pub(crate) fn track_submission(&self, command_buffer: &metal::CommandBufferRef) {
+        *self.1.lock() = Some(AssertSend(command_buffer.to_owned()));
+    }
+
+    fn wait_for_pending_submissions(&self) {
+        if let Some(command_buffer) = self.1.lock().take() {
+            command_buffer.wait_until_completed();
+        }
     }
 
     /// Returns the GPU texture backing `id`, or `None` once every tile in it
@@ -52,6 +62,7 @@ impl PlatformAtlas for MetalAtlas {
         size: Size<DevicePixels>,
         bytes: &[u8],
     ) -> Result<Option<AtlasTile>> {
+        self.wait_for_pending_submissions();
         let lock = self.0.lock();
         if let Some(tile) = lock.tiles_by_key.get(key).copied() {
             if tile.bounds.size == size {
@@ -319,6 +330,25 @@ mod tests {
             })
             .expect("allocation should succeed")
             .expect("callback returns Some")
+    }
+
+    #[test]
+    fn test_update_waits_for_the_latest_gpu_submission() {
+        let Some(device) = metal::Device::system_default() else {
+            return;
+        };
+        let atlas = MetalAtlas::new(device.clone(), true);
+        let queue = device.new_command_queue();
+        let command_buffer = queue.new_command_buffer();
+        atlas.track_submission(command_buffer);
+        command_buffer.commit();
+
+        atlas.wait_for_pending_submissions();
+
+        assert_eq!(
+            command_buffer.status(),
+            metal::MTLCommandBufferStatus::Completed
+        );
     }
 
     #[test]
