@@ -1204,6 +1204,7 @@ pub struct Window {
     window_profiler: profiler::WindowProfiler,
     last_input_modality: InputModality,
     keyboard_modality_mouse_origin: Point<Pixels>,
+    focus_visible: bool,
     pub(crate) refreshing: bool,
     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) focus: Option<FocusId>,
@@ -1887,6 +1888,7 @@ impl Window {
             window_profiler: profiler::WindowProfiler::new(handle.window_id())?,
             last_input_modality: InputModality::Mouse,
             keyboard_modality_mouse_origin: mouse_position,
+            focus_visible: false,
             refreshing: false,
             activation_observers: SubscriberSet::new(),
             focus: None,
@@ -2904,9 +2906,15 @@ impl Window {
     }
 
     /// Returns true if the last input event was keyboard-based (key press, tab navigation, etc.)
-    /// This is used for focus-visible styling to show focus indicators only for keyboard navigation.
+    /// This is used to suppress stale hover until the pointer moves again.
     pub fn last_input_was_keyboard(&self) -> bool {
         self.last_input_modality == InputModality::Keyboard
+    }
+
+    /// Returns whether keyboard focus indicators should be painted.
+    /// Passive pointer movement restores hover without dismissing these indicators.
+    pub fn focus_visible(&self) -> bool {
+        self.focus_visible
     }
 
     /// The current state of the keyboard's capslock
@@ -5233,10 +5241,10 @@ impl Window {
         #[cfg(feature = "profiler")]
         self.window_profiler.begin_input(event.kind_name());
         let update_count_before = self.invalidator.update_count();
-        // Track input modality for focus-visible styling and hover suppression.
-        // Hover is suppressed during keyboard modality so that keyboard navigation
-        // doesn't show hover highlights on the item under the mouse cursor.
+        // Keyboard input suppresses stale hover under a stationary pointer. Pointer
+        // movement restores hover, but only a press dismisses focus-visible styling.
         let old_modality = self.last_input_modality;
+        let old_focus_visible = self.focus_visible;
         self.last_input_modality = match &event {
             PlatformInput::KeyDown(_) => InputModality::Keyboard,
             // A drag is deliberate; only an idle pointer gets the slop.
@@ -5257,7 +5265,14 @@ impl Window {
         {
             self.keyboard_modality_mouse_origin = self.mouse_position;
         }
-        if self.last_input_modality != old_modality {
+        // Focus rings follow the keyboard, and only a press or touch hides
+        // them; pointer movement only restores hover.
+        match &event {
+            PlatformInput::KeyDown(_) => self.focus_visible = true,
+            PlatformInput::MouseDown(_) | PlatformInput::Touch(_) => self.focus_visible = false,
+            _ => {}
+        }
+        if self.last_input_modality != old_modality || self.focus_visible != old_focus_visible {
             self.refresh();
         }
 
@@ -7230,6 +7245,45 @@ mod tests {
     };
 
     struct EmptyView;
+
+    #[test]
+    fn passive_mouse_movement_preserves_focus_visible() {
+        let mut cx = TestAppContext::single();
+        let window: AnyWindowHandle = cx.add_window(|_, _| EmptyView).into();
+
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_keystroke(crate::Keystroke::parse("tab").unwrap(), cx);
+            assert!(window.last_input_was_keyboard());
+            assert!(window.focus_visible());
+
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position: point(px(10.), px(10.)),
+                    pressed_button: None,
+                    modifiers: Default::default(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+            assert!(!window.last_input_was_keyboard());
+            assert!(window.focus_visible());
+
+            window.dispatch_event(
+                MouseDownEvent {
+                    position: point(px(10.), px(10.)),
+                    button: MouseButton::Left,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            assert!(!window.last_input_was_keyboard());
+            assert!(!window.focus_visible());
+        })
+        .unwrap();
+    }
 
     impl Render for EmptyView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
