@@ -14,7 +14,7 @@ doctest = false
 
 [features]
 default = ["wayland", "x11"]
-test-support = ["gpui/test-support"]
+test-support = ["gpui/test-support", "gpui_wgpu?/test-support"]
 wayland = [
     "dep:accesskit_unix",
     "gpui_wgpu",
@@ -61,6 +61,7 @@ collections.workspace = true
 futures.workspace = true
 gpui.workspace = true
 gpui_util.workspace = true
+image.workspace = true
 gpui_wgpu = { workspace = true, optional = true, features = ["font-kit"] }
 http_client.workspace = true
 libc.workspace = true

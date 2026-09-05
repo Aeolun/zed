@@ -44,6 +44,7 @@ required-features = ["bench-support"]
 
 [dependencies]
 gpui.workspace = true
+log.workspace = true
 
 [dev-dependencies]
 bench_metrics.workspace = true
@@ -61,9 +62,7 @@ gpui = { workspace = true, features = ["windows-manifest"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 gpui_linux.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-gpui_wgpu = { workspace = true, optional = true }
+gpui_wgpu = { workspace = true, features = ["font-kit"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 gpui_web.workspace = true

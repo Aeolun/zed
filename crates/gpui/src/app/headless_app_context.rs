@@ -10,9 +10,9 @@
 
 use crate::{
     AnyView, AnyWindowHandle, App, AppCell, AppContext, AssetSource, BackgroundExecutor, Bounds,
-    Context, Entity, EntityId, ForegroundExecutor, Global, Pixels, PlatformHeadlessRenderer,
-    PlatformTextSystem, Render, Reservation, Size, Task, TestDispatcher, TestPlatform, TextSystem,
-    Window, WindowBounds, WindowHandle, WindowOptions,
+    Context, Entity, EntityId, ForegroundExecutor, Global, InputEvent, Keystroke, Pixels,
+    PlatformHeadlessRenderer, PlatformTextSystem, Render, Reservation, Size, Task, TestDispatcher,
+    TestPlatform, TextSystem, Window, WindowBounds, WindowHandle, WindowOptions,
     app::{GpuiBorrow, GpuiMode},
 };
 use anyhow::Result;
@@ -128,6 +128,41 @@ impl HeadlessAppContext {
     /// Runs all pending tasks until parked.
     pub fn run_until_parked(&self) {
         self.dispatcher.run_until_parked();
+    }
+
+    /// Draws the current state of a window into its headless renderer.
+    pub fn draw_window(&mut self, window: AnyWindowHandle) -> Result<()> {
+        let mut app = self.app.borrow_mut();
+        app.update_window(window, |_, window, app| {
+            let arena_clear_needed = window.draw(app);
+            arena_clear_needed.clear(app);
+        })
+    }
+
+    /// Simulates a sequence of keystrokes on the given window.
+    pub fn simulate_keystrokes(&mut self, window: AnyWindowHandle, keystrokes: &str) {
+        for keystroke_text in keystrokes.split_whitespace() {
+            let Ok(keystroke) = Keystroke::parse(keystroke_text) else {
+                log::error!("Invalid keystroke: {keystroke_text}");
+                continue;
+            };
+            if let Err(error) = self.update_window(window, |_, window, cx| {
+                window.dispatch_keystroke(keystroke, cx);
+            }) {
+                log::error!("Failed to dispatch keystroke: {error}");
+            }
+        }
+        self.run_until_parked();
+    }
+
+    /// Simulates an input event on the given window.
+    pub fn simulate_event<E: InputEvent>(&mut self, window: AnyWindowHandle, event: E) {
+        if let Err(error) = self.update_window(window, |_, window, cx| {
+            window.dispatch_event(event.to_platform_input(), cx);
+        }) {
+            log::error!("Failed to dispatch input event: {error}");
+        }
+        self.run_until_parked();
     }
 
     /// Advances the simulated clock.
