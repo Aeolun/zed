@@ -33,6 +33,13 @@ pub trait Styled: Sized {
     gpui_macros::border_style_methods!();
     gpui_macros::box_shadow_style_methods!();
 
+    /// Sets box shadows that paint after this element's descendants without
+    /// participating in layout.
+    fn foreground_shadow(mut self, shadows: Vec<gpui::BoxShadow>) -> Self {
+        self.style().foreground_box_shadow = Some(shadows);
+        self
+    }
+
     /// Sets the display type of the element to `block`.
     /// [Docs](https://tailwindcss.com/docs/display)
     fn block(mut self) -> Self {
