@@ -295,6 +295,12 @@ pub struct Style {
     /// layout space, so showing it (for example on focus) moves nothing.
     pub outline: Option<Outline>,
 
+    /// Box shadows painted after this element's descendants.
+    ///
+    /// Unlike borders, these do not participate in layout. Inset foreground
+    /// shadows are useful for focus rings on containers with opaque children.
+    pub foreground_box_shadow: Vec<BoxShadow>,
+
     /// The text style of this element
     #[refineable]
     pub text: TextStyleRefinement,
@@ -756,6 +762,9 @@ impl Style {
 
         continuation(window, cx);
 
+        window.paint_drop_shadows(bounds, corner_radii, &self.foreground_box_shadow);
+        window.paint_inset_shadows(bounds, corner_radii, &self.foreground_box_shadow);
+
         if self.is_border_visible() {
             let border_widths = self.border_widths.to_pixels(rem_size);
             let mut background = self.border_color.unwrap_or_default();
@@ -851,6 +860,7 @@ impl Default for Style {
             corner_radii: Corners::default(),
             box_shadow: Default::default(),
             outline: None,
+            foreground_box_shadow: Default::default(),
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,
@@ -1380,6 +1390,19 @@ mod tests {
     use super::*;
 
     use util_macros::perf;
+
+    #[test]
+    fn foreground_shadows_do_not_reserve_border_space() {
+        let shadow = BoxShadow::new(px(0.), px(0.), blue())
+            .spread_radius(px(2.))
+            .inset();
+        let mut style = Style::default();
+
+        style.refine(&StyleRefinement::default().foreground_shadow(vec![shadow.clone()]));
+
+        assert_eq!(style.foreground_box_shadow, vec![shadow]);
+        assert_eq!(style.border_widths, Edges::<AbsoluteLength>::zero());
+    }
 
     #[perf]
     fn test_basic_highlight_style_combination() {
