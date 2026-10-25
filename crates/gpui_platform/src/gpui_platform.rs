@@ -244,4 +244,3 @@ mod tests {
         assert!(*task_ran.borrow());
     }
 }
-
