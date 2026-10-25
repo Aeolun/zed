@@ -44,6 +44,7 @@ pub struct HeadlessAppContext {
     pub foreground_executor: ForegroundExecutor,
     dispatcher: TestDispatcher,
     text_system: Arc<TextSystem>,
+    test_platform: Rc<TestPlatform>,
 }
 
 impl HeadlessAppContext {
@@ -88,7 +89,7 @@ impl HeadlessAppContext {
 
         let text_system = Arc::new(TextSystem::new(platform_text_system));
         let http_client = http_client::FakeHttpClient::with_404_response();
-        let app = App::new_app(platform, asset_source, http_client);
+        let app = App::new_app(platform.clone(), asset_source, http_client);
         app.borrow_mut().mode = GpuiMode::test();
 
         Self {
@@ -97,7 +98,21 @@ impl HeadlessAppContext {
             foreground_executor,
             dispatcher,
             text_system,
+            test_platform: platform,
         }
+    }
+
+    /// Simulates responding to a pending Open dialog, including cancellation.
+    pub fn simulate_path_prompt_response(
+        &self,
+        select_paths: impl FnOnce(&crate::PathPromptOptions) -> Option<Vec<std::path::PathBuf>>,
+    ) {
+        self.test_platform.simulate_path_prompt_response(select_paths);
+    }
+
+    /// Returns whether a path selection dialog is pending.
+    pub fn did_prompt_for_paths(&self) -> bool {
+        self.test_platform.did_prompt_for_paths()
     }
 
     /// Opens a window for headless rendering.
@@ -140,7 +155,7 @@ impl HeadlessAppContext {
     }
 
     /// Simulates a sequence of keystrokes on the given window.
-    pub fn simulate_keystrokes(&mut self, window: AnyWindowHandle, keystrokes: &str) {
+    pub fn simulate_keystrokes(&mut self, window: AnyWindowHandle, keystrokes: &'static str) {
         for keystroke_text in keystrokes.split_whitespace() {
             let Ok(keystroke) = Keystroke::parse(keystroke_text) else {
                 log::error!("Invalid keystroke: {keystroke_text}");
@@ -315,5 +330,33 @@ impl AppContext for HeadlessAppContext {
     {
         let app = self.app.borrow();
         app.read_global(callback)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_prompts_can_be_selected_and_cancelled() {
+        let text_system = crate::TestAppContext::single().test_platform().text_system.clone();
+        let cx = HeadlessAppContext::new(text_system);
+        assert!(!cx.did_prompt_for_paths());
+        for selection in [Some(vec![std::path::PathBuf::from("chosen.txt")]), None] {
+            let response = cx.app.borrow().prompt_for_paths(crate::PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: false,
+                prompt: None,
+            });
+            assert!(cx.did_prompt_for_paths());
+            cx.simulate_path_prompt_response(|options| {
+                assert!(options.files);
+                assert!(!options.multiple);
+                selection.clone()
+            });
+            assert!(!cx.did_prompt_for_paths());
+            assert_eq!(crate::block_on(response).unwrap().unwrap(), selection);
+        }
     }
 }

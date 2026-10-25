@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn test_handle_tracked_twice_is_one_stop() {
-        let focus_map = Arc::new(FocusMap::default());
+        let focus_map = Arc::new(parking_lot::RwLock::new(FocusMap::default()));
         let mut map = TabStopMap::default();
         let before = FocusHandle::new(&focus_map).tab_stop(true);
         let twice = FocusHandle::new(&focus_map).tab_stop(true);

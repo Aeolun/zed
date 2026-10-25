@@ -47,7 +47,7 @@ impl Clone for SurfaceSource {
 }
 
 impl std::fmt::Debug for SurfaceSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, #[allow(unused_variables)] f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
             #[cfg(any(target_os = "macos", target_os = "ios"))]
             SurfaceSource::Surface(ref buf) => f.debug_tuple("Surface").field(buf).finish(),

@@ -828,7 +828,7 @@ impl ListState {
         let total = summary.measured_height + average * summary.unrendered_count as f32;
         let viewport = state.last_layout_bounds.unwrap_or_default().size.height;
         let max = (total - viewport).max(px(0.));
-        let offset = if state.logical_scroll_top.is_none()
+        let offset = if state.scroll_anchor.is_none()
             && state.alignment == ListAlignment::Bottom
         {
             max
@@ -1137,7 +1137,7 @@ impl StateInner {
                 scroll_top.offset_in_item += size.height;
             }
             scroll_top.offset_in_item = scroll_top.offset_in_item.max(px(0.));
-            self.logical_scroll_top = Some(scroll_top);
+            self.set_scroll_anchor(Some(scroll_top));
         }
 
         let mut cursor = old_items.cursor::<Count>(());

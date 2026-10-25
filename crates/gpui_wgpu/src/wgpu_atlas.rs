@@ -126,15 +126,15 @@ impl PlatformAtlas for WgpuAtlas {
         bytes: &[u8],
     ) -> Result<Option<AtlasTile>> {
         let mut lock = self.0.lock();
-        if let Some(tile) = lock.tiles_by_key.get(key).copied() {
+        if let Some(tile) = lock.get_or_insert_with(key.clone(), &mut || Ok(None))? {
             if tile.bounds.size == size {
-                lock.upload_texture(tile.texture_id, tile.bounds, bytes);
+                lock.backend.upload_texture(tile.texture_id, tile.bounds, bytes);
                 return Ok(Some(tile));
             }
         }
         drop(lock);
         self.remove(key);
-        self.get_or_insert_with(key, &mut || Ok(Some((size, Cow::Borrowed(bytes)))))
+        self.get_or_insert_with(key.clone(), &mut || Ok(Some((size, Cow::Borrowed(bytes)))))
     }
 
     fn remove(&self, key: &AtlasKey) {
@@ -489,7 +489,7 @@ mod tests {
             height: DevicePixels(1),
         };
         let initial_tile = atlas
-            .get_or_insert_with(&key, &mut || {
+            .get_or_insert_with(key.clone(), &mut || {
                 Ok(Some((initial_size, Cow::Owned(vec![0, 0, 0, 255]))))
             })?
             .expect("tile should be created");

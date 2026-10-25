@@ -2225,12 +2225,12 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
-        let (device, queue) = self.borrow().renderer.gpu_context();
+        let (device, queue) = self.borrow().renderer.as_ref()?.gpu_context();
         Some(Box::new((device, queue)))
     }
 
     fn gpu_device_lost(&self) -> Option<bool> {
-        Some(self.borrow().renderer.device_lost())
+        Some(self.borrow().renderer.as_ref()?.device_lost())
     }
 
     fn play_system_bell(&self) {

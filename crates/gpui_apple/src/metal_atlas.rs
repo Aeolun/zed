@@ -63,16 +63,16 @@ impl PlatformAtlas for MetalAtlas {
         bytes: &[u8],
     ) -> Result<Option<AtlasTile>> {
         self.wait_for_pending_submissions();
-        let lock = self.0.lock();
-        if let Some(tile) = lock.tiles_by_key.get(key).copied() {
+        let mut lock = self.0.lock();
+        if let Some(tile) = lock.get_or_insert_with(key.clone(), &mut || Ok(None))? {
             if tile.bounds.size == size {
-                lock.texture(tile.texture_id).upload(tile.bounds, bytes);
+                lock.backend.texture(tile.texture_id).context("atlas texture is missing")?.upload(tile.bounds, bytes);
                 return Ok(Some(tile));
             }
         }
         drop(lock);
         self.remove(key);
-        self.get_or_insert_with(key, &mut || Ok(Some((size, Cow::Borrowed(bytes)))))
+        self.get_or_insert_with(key.clone(), &mut || Ok(Some((size, Cow::Borrowed(bytes)))))
     }
 
     fn remove(&self, key: &AtlasKey) {

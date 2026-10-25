@@ -3029,6 +3029,11 @@ impl Window {
     ///
     /// Call from a user gesture on platforms that require one. The platform may
     /// decline the request; this does not change focus or the layout viewport.
+    pub fn request_text_input(&self) {
+        self.platform_window.show_soft_keyboard();
+    }
+
+    /// Requests the virtual keyboard for the currently focused text input.
     pub fn request_virtual_keyboard(&self) {
         self.platform_window.show_soft_keyboard();
     }
@@ -5367,10 +5372,10 @@ impl Window {
                 image_id: data.id,
                 frame_index,
             };
-            let key = params.into();
+            let key: crate::AtlasKey = params.into();
             let previous_tile = self
                 .sprite_atlas
-                .get_or_insert_with(&key, &mut || Ok(None))?;
+                .get_or_insert_with(key.clone(), &mut || Ok(None))?;
             let bytes = data
                 .as_bytes(frame_index)
                 .ok_or_else(|| anyhow!("missing image frame {frame_index}"))?;
@@ -5510,7 +5515,7 @@ impl Window {
         let mut id = self.next_hitbox_id;
         self.next_hitbox_id = self.next_hitbox_id.next();
         let identity = (!self.element_id_stack.is_empty())
-            .then(|| GlobalElementId(Arc::from(&*self.element_id_stack)));
+            .then(|| GlobalElementId::new(&self.element_id_stack));
         if identity.is_some() && self.captured_identity == identity {
             self.captured_hitbox = Some(id);
         }
@@ -6021,7 +6026,7 @@ impl Window {
             PlatformInput::MouseMove(_)
             | PlatformInput::MouseDown(_)
             | PlatformInput::MouseUp(_)
-            | PlatformInput::ScrollWheel(_)
+            | PlatformInput::Scroll(_)
             | PlatformInput::Pinch(_) => self.pointer_outside = false,
             _ => {}
         }

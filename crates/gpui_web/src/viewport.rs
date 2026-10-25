@@ -95,6 +95,7 @@ impl WebViewport {
                 })),
                 ..Edges::default()
             },
+            ..WindowInsets::default()
         };
         let changed = self.visible_bounds != visible_bounds || self.insets != insets;
         self.visible_bounds = visible_bounds;

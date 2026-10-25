@@ -62,6 +62,7 @@ use std::{
 const MAC_PLATFORM_IVAR: &CStr = c"platform";
 static mut APP_CLASS: *const AnyClass = ptr::null();
 static mut APP_DELEGATE_CLASS: *const AnyClass = ptr::null();
+static REGISTERED_MAC_PLATFORM: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 #[ctor(unsafe)]
 unsafe fn build_classes() {
@@ -623,9 +624,9 @@ unsafe fn pump_app_nonblocking() {
 
         for _ in 0..256 {
             let event: *mut AnyObject = msg_send![app,
-                nextEventMatchingMask: usize::MAX
-                untilDate: distant_past
-                inMode: mode
+                nextEventMatchingMask: usize::MAX,
+                untilDate: distant_past,
+                inMode: mode,
                 dequeue: true
             ];
             if event.is_null() {
