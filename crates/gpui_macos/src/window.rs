@@ -1153,7 +1153,11 @@ impl MacWindow {
             if titlebar
                 .as_ref()
                 .is_some_and(|titlebar| !titlebar.appears_transparent)
-                && is_macos_version_at_least(NSOperatingSystemVersion::new(11, 0, 0))
+                && is_macos_version_at_least(NSOperatingSystemVersion {
+                    majorVersion: 11,
+                    minorVersion: 0,
+                    patchVersion: 0,
+                })
             {
                 let _: () = msg_send![
                     native_window,
